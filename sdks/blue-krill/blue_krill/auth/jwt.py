@@ -60,7 +60,7 @@ class ClientJWTAuth(AuthBase):
 
     def __call__(self, r):
         r.headers["Authorization"] = self.make_authorization_header_value()
-        logger.debug(f"got remote services' jwt header: {r.headers}")
+        logger.debug("jwt authorization header injected, iss: %s", self.auth_conf.iss)
         return r
 
     def make_authorization_header_value(self, extra_payload: Optional[Dict] = None) -> str:

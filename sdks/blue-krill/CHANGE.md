@@ -1,5 +1,9 @@
 ## Change logs
 
+### Unreleased
+
+- 优化 BKRepo、JWT 认证、Redis 探针等模块的日志输出内容
+
 ### 3.1.1
 
 - 放宽 django-environ 的版本限制

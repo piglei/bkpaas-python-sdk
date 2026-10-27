@@ -15,6 +15,7 @@
 # We undertake not to change the open source license (MIT license) applicable
 # to the current version of the project delivered to anyone in the future.
 
+import logging
 import time
 from unittest.mock import MagicMock
 
@@ -100,3 +101,27 @@ class TestVerifiedClientMiddleware:
         request = rf.get("/", HTTP_AUTHORIZATION="Bearer not-a-jwt-token")
         VerifiedClientMiddleware(MagicMock())(request)
         assert request.client is None
+
+
+class TestTokenNotLogged:
+    def test_client_jwt_auth(self, requests_mock, caplog):
+        caplog.set_level(logging.DEBUG)
+        auth = ClientJWTAuth(JWTAuthConf(iss="foo", key="bar", algorithm="HS256"))
+
+        requests_mock.register_uri(requests_mock_mod.ANY, requests_mock_mod.ANY, text="resp")
+        resp = requests.get("mock://", auth=auth)
+
+        token = resp.request.headers["Authorization"].split()[1]
+        assert token not in caplog.text
+
+    def test_middleware_auth_failed(self, rf, caplog):
+        caplog.set_level(logging.DEBUG)
+        payload = {"iss": _JWT_CLIENT["iss"], "expires_at": time.time() + 3600, "role": "foo_role"}
+        token = jwt.encode(payload, key="another_random_key", algorithm=_JWT_CLIENT["algorithm"])
+
+        request = rf.get("/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        VerifiedClientMiddleware(MagicMock())(request)
+
+        assert request.client is None
+        assert caplog.records, "no logs captured"
+        assert token not in caplog.text

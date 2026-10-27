@@ -161,7 +161,7 @@ class VerifiedClientMiddleware:
                 request.client = ret.client
                 request.extra_payload = ret.extra_payload
             except AuthFailedError as e:
-                logger.info("Unable to create an authenticated client using token: %s, reason: %s", token, e)
+                logger.info("Unable to create an authenticated client using token, reason: %s", e)
 
         response = self.get_response(request)
         return response

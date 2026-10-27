@@ -16,7 +16,9 @@
 # to the current version of the project delivered to anyone in the future.
 
 import base64
+import contextlib
 import io
+import logging
 from tempfile import SpooledTemporaryFile
 from unittest import mock
 from urllib.parse import urljoin
@@ -28,7 +30,7 @@ from requests.auth import HTTPBasicAuth
 
 from blue_krill.contextlib import nullcontext as does_not_raise
 from blue_krill.storages.blobstore.bkrepo import BKGenericRepo, BKRepoManager
-from blue_krill.storages.blobstore.exceptions import ObjectAlreadyExists, UploadFailedError
+from blue_krill.storages.blobstore.exceptions import DownloadFailedError, ObjectAlreadyExists, UploadFailedError
 from tests.utils import generate_random_string
 
 
@@ -218,3 +220,92 @@ class TestBKRepoManager:
         resp = manager_without_tenant.get_client().post(url, json={"name": "test"})
 
         assert "X-Bk-Tenant-Id" not in resp.request.headers
+
+
+class TestCredentialsNotLogged:
+    """调用 BkRepo 时打印的日志中不能包含任何凭证信息"""
+
+    @pytest.fixture(autouse=True)
+    def _capture_all_logs(self, caplog):
+        caplog.set_level(logging.DEBUG)
+
+    @pytest.fixture
+    def secrets(self, username, password):
+        basic_token = base64.b64encode(f"{username}:{password}".encode()).decode()
+        return [password, basic_token]
+
+    @staticmethod
+    def assert_no_secrets(caplog, secrets):
+        assert caplog.records, "no logs captured"
+        for secret in secrets:
+            assert secret not in caplog.text
+
+    @pytest.mark.parametrize("fake_response", [{"code": 0, "message": ""}, {"code": 1, "message": ""}])
+    def test_upload(self, store, adapter, endpoint, project, caplog, secrets, fake_response):
+        key = "dummy-key"
+        adapter.register_uri("PUT", urljoin(endpoint, f"/generic/{project}/dummy-bucket/{key}"), json=fake_response)
+        with contextlib.suppress(UploadFailedError):
+            store.upload_fileobj(io.BytesIO(b"foo"), key=key)
+        self.assert_no_secrets(caplog, secrets)
+
+    def test_delete_file(self, store, adapter, endpoint, project, caplog, secrets):
+        key = "dummy-key"
+        adapter.register_uri(
+            "DELETE", urljoin(endpoint, f"/generic/{project}/dummy-bucket/{key}"), json={"code": 0, "data": None}
+        )
+        store.delete_file(key)
+        self.assert_no_secrets(caplog, secrets)
+
+    def test_generate_presigned_url(self, store, adapter, endpoint, caplog, secrets):
+        adapter.register_uri(
+            "POST",
+            urljoin(endpoint, "/generic/temporary/url/create"),
+            json={"code": 0, "message": "", "data": [{"url": urljoin(endpoint, "foo")}]},
+        )
+        store.generate_presigned_url("dummy-key", expires_in=3600)
+        self.assert_no_secrets(caplog, secrets)
+
+    def test_download(self, store, adapter, endpoint, project, caplog, secrets):
+        key = "dummy-key"
+        url = urljoin(endpoint, f"/generic/{project}/dummy-bucket/{key}")
+        adapter.register_uri("GET", url, body=io.BytesIO(b"foo"))
+        with SpooledTemporaryFile() as fh:
+            store.download_fileobj(key, fh=fh)
+        self.assert_no_secrets(caplog, secrets)
+        # The log should still be helpful for troubleshooting
+        assert url in caplog.text
+
+    def test_download_rejected(self, store, adapter, endpoint, project, caplog, secrets):
+        key = "dummy-key"
+        url = urljoin(endpoint, f"/generic/{project}/dummy-bucket/{key}")
+        adapter.register_uri("GET", url, status_code=403, text="forbidden")
+        with SpooledTemporaryFile() as fh, pytest.raises(DownloadFailedError):
+            store.download_fileobj(key, fh=fh)
+        self.assert_no_secrets(caplog, secrets)
+        assert any(r.levelno == logging.ERROR and url in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        ("method", "http_method", "url_suffix"),
+        [
+            ("create_user_to_repo", "POST", "/auth/api/user/create/repo"),
+            ("create_user_to_project", "POST", "/auth/api/user/create/project"),
+            ("update_user", "PUT", "/auth/api/user/new-user"),
+        ],
+    )
+    def test_manager_user_password(
+        self, session, adapter, username, password, endpoint, caplog, secrets, method, http_method, url_suffix
+    ):
+        manager = BKRepoManager(endpoint_url=endpoint, username=username, password=password)
+        new_user_password = generate_random_string()
+        adapter.register_uri(http_method, urljoin(endpoint, url_suffix), json={"code": 0, "data": True})
+
+        kwargs = {"username": "new-user", "password": new_user_password, "association_users": ["foo"]}
+        if method == "create_user_to_repo":
+            kwargs.update(project="p", repo="r")
+        elif method == "create_user_to_project":
+            kwargs.update(project="p")
+
+        session.auth = HTTPBasicAuth(username=username, password=password)
+        with mock.patch.object(manager, "get_client", return_value=session):
+            getattr(manager, method)(**kwargs)
+        self.assert_no_secrets(caplog, [*secrets, new_user_password])
